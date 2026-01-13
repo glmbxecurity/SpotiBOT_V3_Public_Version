@@ -1,5 +1,5 @@
-# 🎧 SpotiBOT Public Service (v1.0)
-
+# 🎧 SpotiBOT Public Service (v1.0)  
+[![Telegram](https://img.shields.io/badge/Telegram-Iniciar_Bot-blue?style=for-the-badge&logo=telegram)](https://t.me/official_spotibot)  
 **SpotiBOT Public** es una solución de arquitectura diseñada para desplegar un **Bot de Telegram como Servicio (SaaS)**. A diferencia de otros scripts personales, este bot está diseñado para atender a múltiples usuarios, generando contenido bajo demanda mediante algoritmos inteligentes y manteniendo la higiene de la cuenta mediante un sistema de auto-limpieza.
 
 ![SpotiBOT Architecture](https://raw.githubusercontent.com/glmbxecurity/SpotiBOT_V3/refs/heads/main/images/spotibot4.png)
