@@ -16,9 +16,7 @@ import config
 import stats
 
 # MÓDULOS
-# --- AÑADIDO: check_catalog_health al import ---
 from comandos_basicos import start, help_command, info_command, check_catalog_health
-# -----------------------------------------------
 
 from funcion_create import (
     start_create, handle_source_selection, handle_preset_selection, 
@@ -66,6 +64,7 @@ async def mix_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --- LÓGICA DEL BOTÓN MENÚ PRINCIPAL ---
+# --- LÓGICA DEL BOTÓN MENÚ PRINCIPAL ---
 async def return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -75,63 +74,89 @@ async def return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
     return ConversationHandler.END
 
+# --- INT ERRORES SILENCIOSOS (CROSS-CANCELLATION) ---
+# Esta función simplemente termina la conversación actual sin decir nada.
+# Se usa cuando otro comando "roba" el foco.
+async def quiet_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return ConversationHandler.END
+
 if __name__ == '__main__':
     print("🔥 SpotiBOT v1.0 ONLINE")
     
     application = ApplicationBuilder().token(config.TELEGRAM_TOKEN).build()
     
-    # 1. HANDLERS GLOBALES (BOTONES)
+    # 1. HANDLERS GLOBALES
     application.add_handler(CallbackQueryHandler(return_to_menu, pattern='^return_menu$'))
-    
-    # --- NUEVO: HANDLER PARA CHEQUEO DE CATÁLOGO ---
     application.add_handler(CallbackQueryHandler(check_catalog_health, pattern='^check_catalog$'))
-    # -----------------------------------------------
 
-    # 2. COMANDOS
+    # 2. COMANDOS BÁSICOS
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('info', info_command))
     
-    # 3. CREATE (NUEVO ORDEN DE ESTADOS)
+    # 3. CREATE (GROUP 1)
     create_handler = ConversationHandler(
         entry_points=[CommandHandler('create', create_entry_point)],
         states={
-            # 1. Primero Algoritmo
             ALGORITHM: [CallbackQueryHandler(save_algorithm, pattern='^algo_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            # 2. Luego Origen
             SOURCE: [CallbackQueryHandler(handle_source_selection, pattern='^src_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            # 3. Ramas (Presets o Links)
             SELECT_PRESET: [CallbackQueryHandler(handle_preset_selection, pattern='^genre_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
             INPUT_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_links), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            # 4. Final: Duración
             DURATION: [CallbackQueryHandler(process_creation, pattern='^dur_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
         },
-        fallbacks=[CommandHandler('cancel', cancel_create), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
+        fallbacks=[
+            CommandHandler('cancel', cancel_create), 
+            CallbackQueryHandler(cancel_create, pattern='^return_menu$'),
+            # Interrupciones de otros comandos:
+            CommandHandler('scan', quiet_cancel),
+            CommandHandler('mix', quiet_cancel),
+            CommandHandler('info', quiet_cancel),
+            CommandHandler('help', quiet_cancel),
+            CommandHandler('start', quiet_cancel)
+        ],
         per_message=False
     )
-    application.add_handler(create_handler)
+    application.add_handler(create_handler, group=1)
 
-    # 4. SCAN
+    # 4. SCAN (GROUP 2)
     scan_handler = ConversationHandler(
         entry_points=[CommandHandler('scan', scan_entry_point)],
         states={
             INPUT_SCAN_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_link), CallbackQueryHandler(cancel_scan, pattern='^return_menu$')],
             SELECT_LIMIT: [CallbackQueryHandler(process_scan_result, pattern='^limit_'), CallbackQueryHandler(cancel_scan, pattern='^return_menu$')]
         },
-        fallbacks=[CommandHandler('cancel', cancel_scan), CallbackQueryHandler(cancel_scan, pattern='^return_menu$')],
+        fallbacks=[
+            CommandHandler('cancel', cancel_scan), 
+            CallbackQueryHandler(cancel_scan, pattern='^return_menu$'),
+            # Interrupciones:
+            CommandHandler('create', quiet_cancel),
+            CommandHandler('mix', quiet_cancel),
+            CommandHandler('info', quiet_cancel),
+            CommandHandler('help', quiet_cancel),
+            CommandHandler('start', quiet_cancel)
+        ],
         per_message=False
     )
-    application.add_handler(scan_handler)
+    application.add_handler(scan_handler, group=2)
 
-    # 5. MIX
+    # 5. MIX (GROUP 3)
     mix_handler = ConversationHandler(
         entry_points=[CommandHandler('mix', mix_entry_point)],
         states={
             INPUT_MIX_LINKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_mix), CallbackQueryHandler(cancel_mix, pattern='^return_menu$')]
         },
-        fallbacks=[CommandHandler('cancel', cancel_mix), CallbackQueryHandler(cancel_mix, pattern='^return_menu$')],
+        fallbacks=[
+            CommandHandler('cancel', cancel_mix), 
+            CallbackQueryHandler(cancel_mix, pattern='^return_menu$'),
+            # Interrupciones:
+            CommandHandler('create', quiet_cancel),
+            CommandHandler('scan', quiet_cancel),
+            CommandHandler('info', quiet_cancel),
+            CommandHandler('help', quiet_cancel),
+            CommandHandler('start', quiet_cancel)
+        ],
         per_message=False
     )
-    application.add_handler(mix_handler)
+    application.add_handler(mix_handler, group=3)
     
     application.run_polling()

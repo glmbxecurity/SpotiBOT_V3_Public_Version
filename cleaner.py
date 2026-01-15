@@ -1,9 +1,10 @@
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+# from spotipy.oauth2 import SpotifyOAuth (ELIMINADO)
 import logging
 import time
 from datetime import datetime, timezone
 import config
+from spotify_helper import sp # Importamos el cliente seguro
 
 # CONFIGURACIÓN
 SAFE_PREFIX = "SpotiSession"  # Solo tocamos las listas del bot
@@ -21,14 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger("Cleaner")
 
 def get_spotify_client():
-    return spotipy.Spotify(auth_manager=SpotifyOAuth(
-        client_id=config.SPOTIPY_CLIENT_ID,
-        client_secret=config.SPOTIPY_CLIENT_SECRET,
-        redirect_uri=config.SPOTIPY_REDIRECT_URI,
-        scope="playlist-modify-public playlist-modify-private playlist-read-private",
-        open_browser=False,
-        cache_path=config.CACHE_PATH
-    ))
+    return sp # Usamos la instancia global segura
 
 def run_cleanup():
     sp = get_spotify_client()

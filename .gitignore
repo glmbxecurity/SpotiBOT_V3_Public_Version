@@ -1,0 +1,10 @@
+config.py
+.cache_spotibot
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+*.log
+stats.json
+.DS_Store

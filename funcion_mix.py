@@ -1,5 +1,4 @@
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 import random
@@ -12,16 +11,10 @@ from io import BytesIO
 import config
 import stats
 from utils import extract_playlist_id, get_back_button
+from spotify_helper import sp
 
 INPUT_MIX_LINKS = 0
-
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=config.SPOTIPY_CLIENT_ID,
-    client_secret=config.SPOTIPY_CLIENT_SECRET,
-    redirect_uri=config.SPOTIPY_REDIRECT_URI,
-    scope="playlist-modify-public playlist-modify-private playlist-read-private ugc-image-upload",
-    cache_path=config.CACHE_PATH
-))
+# sp = ... (ELIMINADO: Usamos la instancia global de spotify_helper)
 
 # --- FUNCIÓN DE RETORNO AL MENÚ ---
 async def cancel_mix(update: Update, context: ContextTypes.DEFAULT_TYPE):

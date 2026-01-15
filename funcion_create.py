@@ -1,6 +1,5 @@
 import random
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 import qrcode
@@ -14,18 +13,13 @@ from datetime import datetime, timezone
 import config
 import stats
 from utils import load_presets, extract_playlist_id, get_back_button
+from spotify_helper import sp # IMPORTAMOS EL CLIENTE SEGURO
 
 # ESTADOS
 ALGORITHM, SOURCE, SELECT_PRESET, INPUT_LINK, DURATION = range(5)
 
 # SETUP SPOTIFY
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=config.SPOTIPY_CLIENT_ID,
-    client_secret=config.SPOTIPY_CLIENT_SECRET,
-    redirect_uri=config.SPOTIPY_REDIRECT_URI,
-    scope="playlist-modify-public playlist-modify-private playlist-read-private ugc-image-upload",
-    cache_path=config.CACHE_PATH
-))
+# sp = ... (ELIMINADO: Usamos la instancia global de spotify_helper)
 
 # --- FUNCIÓN DE RETORNO AL MENÚ ---
 async def cancel_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,6 +95,10 @@ async def handle_source_selection(update: Update, context: ContextTypes.DEFAULT_
                 else:
                     random_sources.append(picked)
         context.user_data['source_urls'] = random_sources
+        
+        context.user_data['source_tag'] = "Surprise Mix"
+        context.user_data['source_desc'] = "Selección Aleatoria Global"
+        
         return await ask_duration(query, context)
 
 # 4A. SI ELIGIÓ CATÁLOGO
@@ -117,6 +115,10 @@ async def handle_preset_selection(update: Update, context: ContextTypes.DEFAULT_
         if 0 <= idx < len(all_genres):
             genre = all_genres[idx]
             context.user_data['source_urls'] = [item['url'] for item in presets.get(genre, [])]
+            
+            context.user_data['source_tag'] = genre
+            context.user_data['source_desc'] = f"Catálogo: {genre}"
+            
         else:
             await query.edit_message_text("❌ Error: Género no encontrado.")
             return await cancel_create(update, context)
@@ -138,6 +140,8 @@ async def handle_user_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return INPUT_LINK
         
     context.user_data['source_urls'] = valid_urls
+
+    context.user_data['source_tag'] = "Custom Mix"
     
     keyboard = [
         [InlineKeyboardButton("30 min", callback_data='dur_30'), InlineKeyboardButton("60 min", callback_data='dur_60')],
@@ -159,7 +163,7 @@ async def ask_duration(query, context):
     await query.edit_message_text("⏱️ **PASO 3: Duración**", reply_markup=InlineKeyboardMarkup(keyboard))
     return DURATION
 
-# 5. PROCESO FINAL
+# 5. PROCESO FINAL (LÓGICA ROUND ROBIN IMPLEMENTADA)
 async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -173,113 +177,140 @@ async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         source_urls = context.user_data.get('source_urls', [])
         source_urls = [u for u in source_urls if u] 
+        algo = context.user_data.get('algorithm')
+        now = datetime.now(timezone.utc)
         
-        all_tracks = []
+        # --- ESTRATEGIA ROUND ROBIN: PROCESAMOS CADA PLAYLIST POR SEPARADO ---
+        playlists_buckets = [] # Aquí guardaremos listas de canciones ya ordenadas: [[A1, A2...], [B1, B2...]]
+        real_playlist_names = []
+        
         for url in source_urls:
             pid = extract_playlist_id(url)
             if not pid: continue
+            
+            # 1. Obtener Nombre (si es custom)
+            if context.user_data.get('source_tag') == "Custom Mix":
+                try:
+                    pl_meta = sp.playlist(pid, fields="name")
+                    real_playlist_names.append(pl_meta['name'])
+                except:
+                    real_playlist_names.append("Privada")
+
+            # 2. Leer canciones de ESTA fuente
+            this_pl_tracks = []
             try:
-                res = sp.playlist_tracks(pid, limit=100)
+                res = sp.playlist_tracks(pid, limit=100) # Leemos 100 para tener margen de filtrado
                 items = res['items']
-                if res['next']:
+                if res['next']: # Si hay más, leemos un poco más
                      res = sp.next(res)
                      items.extend(res['items'])
                 
                 for item in items:
                     if item.get('track') and item['track'].get('id'):
-                        all_tracks.append(item)
+                        this_pl_tracks.append(item)
             except Exception as e:
-                print(f"⚠️ Error menor leyendo fuente {url}: {e}") 
-
-        if not all_tracks:
-            await msg.edit_text("❌ No pude leer canciones válidas.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
-            return ConversationHandler.END
-
-        # MEZCLA PREVIA
-        random.shuffle(all_tracks)
-
-        tids = list(set([t['track']['id'] for t in all_tracks]))
-        features_map = {}
-        for i in range(0, len(tids), 100):
-            try:
-                chunk = tids[i:i+100]
-                feats = sp.audio_features(chunk)
-                for f in feats:
-                    if f: features_map[f['id']] = f
-            except: pass
-
-        algo = context.user_data.get('algorithm')
-        processed_tracks = []
-        now = datetime.now(timezone.utc)
-        
-        seen_uris = set()
-
-        for item in all_tracks:
-            track = item['track']
-            uri = track['uri']
-
-            if uri in seen_uris: continue
+                print(f"⚠️ Error leyendo {url}: {e}")
+                continue
             
-            feat = features_map.get(track['id'])
-            
-            # --- FACTOR CAOS (PONDERADO) ---
-            luck = random.randint(0, 100)
-            score = 0
-            
-            if algo == 'algo_energy': 
-                # 70% Energía / 30% Suerte (Para el gym/entreno la energía manda, pero variamos)
-                energy_val = (feat['energy'] * 100) if feat else 50
-                score = (energy_val * 0.7) + (luck * 0.3)
+            if not this_pl_tracks: continue
 
-            elif algo == 'algo_party': 
-                # --- CAMBIO APLICADO: 85% Hits / 15% Suerte ---
-                # Queremos asegurar los hits conocidos.
-                base_val = track['popularity']
-                if feat: base_val += (feat['danceability'] * 100)
-                base_val = base_val / 2
-                score = (base_val * 0.85) + (luck * 0.15)
-
-            elif algo == 'algo_discovery':
+            # 3. Obtener Audio Features de ESTE lote
+            tids = list(set([t['track']['id'] for t in this_pl_tracks]))
+            features_map = {}
+            for i in range(0, len(tids), 100):
                 try:
-                    if item.get('added_at'):
-                        added = datetime.fromisoformat(item['added_at'].replace('Z', '+00:00'))
-                        days_old = (now - added).days
-                        
-                        if days_old <= 30: 
-                            # Boost Masivo a lo nuevo + Suerte para rotar novedades
-                            score = 500 + track['popularity'] + (luck * 2) 
-                        else: 
-                            # Si es vieja, la suerte influye más
+                    chunk = tids[i:i+100]
+                    feats = sp.audio_features(chunk)
+                    for f in feats:
+                        if f: features_map[f['id']] = f
+                except: pass
+
+            # 4. Puntuar y Ordenar ESTE lote (Aplicar criterio Energy/Hype + Jitter)
+            scored_tracks = []
+            
+            # Shuffle inicial para romper el orden de la lista original antes de puntuar
+            random.shuffle(this_pl_tracks) 
+
+            for item in this_pl_tracks:
+                track = item['track']
+                feat = features_map.get(track['id'])
+                
+                # --- FACTOR CAOS (JITTER) ---
+                luck = random.randint(0, 100)
+                score = 0
+                
+                if algo == 'algo_energy': 
+                    energy_val = (feat['energy'] * 100) if feat else 50
+                    score = (energy_val * 0.7) + (luck * 0.3)
+
+                elif algo == 'algo_party': 
+                    base_val = track['popularity']
+                    if feat: base_val += (feat['danceability'] * 100)
+                    base_val = base_val / 2
+                    score = (base_val * 0.85) + (luck * 0.15)
+
+                elif algo == 'algo_discovery':
+                    try:
+                        if item.get('added_at'):
+                            added = datetime.fromisoformat(item['added_at'].replace('Z', '+00:00'))
+                            days_old = (now - added).days
+                            if days_old <= 30: 
+                                score = 500 + track['popularity'] + (luck * 2) 
+                            else: 
+                                score = (track['popularity'] * 0.5) + (luck * 0.5)
+                        else:
                             score = (track['popularity'] * 0.5) + (luck * 0.5)
-                    else:
+                    except: 
                         score = (track['popularity'] * 0.5) + (luck * 0.5)
-                except: 
-                    score = (track['popularity'] * 0.5) + (luck * 0.5)
 
-            if score > 0: 
-                processed_tracks.append({'uri': uri, 'dur': track['duration_ms'], 'score': score})
-                seen_uris.add(uri)
+                if score > 0:
+                    scored_tracks.append({'uri': track['uri'], 'dur': track['duration_ms'], 'score': score})
 
-        processed_tracks.sort(key=lambda x: x['score'], reverse=True)
-        
-        if not processed_tracks and all_tracks:
-             for t in all_tracks:
-                 uri = t['track']['uri']
-                 if uri not in seen_uris:
-                     processed_tracks.append({'uri': uri, 'dur': t['track']['duration_ms'], 'score': 1})
-                     seen_uris.add(uri)
+            # Ordenamos este cubo por puntuación (Los mejores de ESTA lista arriba)
+            scored_tracks.sort(key=lambda x: x['score'], reverse=True)
+            
+            if scored_tracks:
+                playlists_buckets.append(scored_tracks)
 
-        if not processed_tracks:
-            await msg.edit_text("⚠️ No quedaron canciones tras el filtro.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+        if not playlists_buckets:
+            await msg.edit_text("❌ No pude obtener canciones válidas de ninguna lista.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
             return ConversationHandler.END
 
+        # --- FASE DE MEZCLA: ROUND ROBIN ---
         final_uris = []
         curr_ms = 0
-        for t in processed_tracks:
-            if curr_ms + t['dur'] > limit_ms: break
-            final_uris.append(t['uri'])
-            curr_ms += t['dur']
+        seen_uris = set()
+        
+        # Iteramos mientras no alcancemos el tiempo y queden canciones
+        keep_going = True
+        while keep_going:
+            keep_going = False # Asumimos que paramos a menos que añadamos algo
             
+            # Recorremos cada cubo (playlist) y sacamos LA MEJOR que le quede
+            for bucket in playlists_buckets:
+                if not bucket: continue # Este cubo ya se vació
+                
+                # Comprobamos si nos pasamos de tiempo antes de añadir
+                if curr_ms >= limit_ms:
+                    keep_going = False
+                    break
+                
+                # Sacamos la mejor canción restante (pop del principio)
+                track = bucket.pop(0)
+                
+                if track['uri'] not in seen_uris:
+                    final_uris.append(track['uri'])
+                    seen_uris.add(track['uri'])
+                    curr_ms += track['dur']
+                    keep_going = True # Hemos añadido algo, seguimos otra vuelta
+
+            if curr_ms >= limit_ms: break
+
+        if not final_uris:
+            await msg.edit_text("⚠️ No se generó la lista.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+            return ConversationHandler.END
+
+        # --- CREACIÓN EN SPOTIFY ---
         user_id = sp.me()['id']
         unique_suffix = uuid.uuid4().hex[:4].upper()
         tg_user = update.effective_user
@@ -292,13 +323,28 @@ async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         mode_str = mode_names.get(algo, 'Mix')
         
-        playlist_name = f"SpotiSession {mode_str} [{unique_suffix}]"
+        # Descripción
+        source_tag = context.user_data.get('source_tag', 'Mix')
+        if source_tag == "Custom Mix" and real_playlist_names:
+            names_str = ", ".join(real_playlist_names)
+            if len(names_str) > 150: names_str = names_str[:147] + "..."
+            source_desc = f"Mezcla equitativa de: {names_str}"
+        else:
+            source_desc = context.user_data.get('source_desc', 'Origen desconocido')
+
+        playlist_name = f"SpotiSession: {source_tag} ({mode_str}) [{unique_suffix}]"
+        
+        final_description = (
+            f"Creada por SpotiBOT para {user_ref}. "
+            f"Modo: {mode_str}. "
+            f"{source_desc}."
+        )
         
         new_pl = sp.user_playlist_create(
             user=user_id, 
             name=playlist_name, 
             public=True, 
-            description=f"Mezcla generada por SpotiBOT para {user_ref}. Modo: {mode_str}"
+            description=final_description
         )
         
         stats.count_new_playlist()
@@ -332,6 +378,7 @@ async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         caption = (
             f"✅ **{playlist_name}**\n\n"
+            f"📝 **{source_desc}**\n\n"
             f"⏱ **Duración:** {int(curr_ms/60000)} min\n"
             f"🔗 {pl_url}\n\n"
             "♻️ **Esta playlist se autodestruirá en 3 meses.**\n"

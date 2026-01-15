@@ -1,20 +1,13 @@
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 import statistics
 import config
 from utils import extract_playlist_id, get_back_button
+from spotify_helper import sp
 
 INPUT_SCAN_LINK, SELECT_LIMIT = range(2)
-
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=config.SPOTIPY_CLIENT_ID,
-    client_secret=config.SPOTIPY_CLIENT_SECRET,
-    redirect_uri=config.SPOTIPY_REDIRECT_URI,
-    scope="playlist-read-private",
-    cache_path=config.CACHE_PATH
-))
+# sp = ... (ELIMINADO: Usamos la instancia global de spotify_helper)
 
 # Función de salida forzada
 async def cancel_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -1,5 +1,4 @@
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from datetime import datetime, timezone
@@ -9,16 +8,10 @@ import dateutil.parser
 import config
 import stats
 from utils import load_presets, get_back_button, extract_playlist_id
+from spotify_helper import sp as sp_info
 
 # --- SETUP SPOTIFY (Para Info y Chequeo) ---
-sp_info = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=config.SPOTIPY_CLIENT_ID,
-    client_secret=config.SPOTIPY_CLIENT_SECRET,
-    redirect_uri=config.SPOTIPY_REDIRECT_URI,
-    scope="playlist-read-private",
-    open_browser=False,
-    cache_path=config.CACHE_PATH
-))
+# sp_info = ... (ELIMINADO: Usamos la instancia global de spotify_helper)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
