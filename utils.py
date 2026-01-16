@@ -25,7 +25,7 @@ def load_presets(path="presets.yaml"):
         return {}
 
 def extract_playlist_id(url):
-    match = re.search(r"playlist/([a-zA-Z0-9]+)", url)
+    match = re.search(r"playlist/([a-zA-Z0-9_-]+)", url)
     return match.group(1) if match else None
 
 def get_back_button():

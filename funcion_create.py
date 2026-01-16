@@ -1,6 +1,6 @@
 import random
 import spotipy
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 import qrcode
 import os
@@ -13,13 +13,10 @@ from datetime import datetime, timezone
 import config
 import stats
 from utils import load_presets, extract_playlist_id, get_back_button
-from spotify_helper import sp # IMPORTAMOS EL CLIENTE SEGURO
+from spotify_helper import sp
 
-# ESTADOS
-ALGORITHM, SOURCE, SELECT_PRESET, INPUT_LINK, DURATION = range(5)
-
-# SETUP SPOTIFY
-# sp = ... (ELIMINADO: Usamos la instancia global de spotify_helper)
+# ESTADOS NUEVOS (FLUJO: MODE -> SOURCE -> ALGO -> DURATION)
+SELECT_MODE, INPUT_LINKS, SELECT_CATALOG_SINGLE, SELECT_CATALOG_MULTI, SELECT_ALGORITHM, SELECT_DURATION = range(6)
 
 # --- FUNCIÓN DE RETORNO AL MENÚ ---
 async def cancel_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,188 +30,319 @@ async def cancel_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
     return ConversationHandler.END
 
-# 1. PUNTO DE ENTRADA
+# 1. PUNTO DE ENTRADA: MENU PRINCIPAL DE CREACIÓN
 async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear() 
     
     keyboard = [
-        [InlineKeyboardButton("⚡ Max Energy", callback_data='algo_energy')],
-        [InlineKeyboardButton("🎉 Party Hype", callback_data='algo_party')],
-        [InlineKeyboardButton("🔭 Discovery", callback_data='algo_discovery')],
+        [InlineKeyboardButton("🔗 Pega tus propias playlist", callback_data='mode_links')],
+        [InlineKeyboardButton("💿 Elige entre los estilos del bot", callback_data='mode_catalog')],
+        [InlineKeyboardButton("🧬 Mezcla de estilos del bot", callback_data='mode_mix')],
+        [InlineKeyboardButton("🎲 Random mix (Mezcla estilos random del bot)", callback_data='mode_random')],
         [get_back_button()]
     ]
-    await update.message.reply_text("🧠 **PASO 1: Elige el estilo**", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ALGORITHM
+    
+    text = (
+        "🎧 **CREADOR DE SESIONES**\n"
+        "Elige tu fuente de inspiración:"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    return SELECT_MODE
 
-# 2. GUARDAR ALGORITMO Y PREGUNTAR ORIGEN
-async def save_algorithm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 2. MANEJADOR DE MODO
+async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == 'return_menu': return await cancel_create(update, context)
     
-    context.user_data['algorithm'] = query.data
+    mode = query.data
+    context.user_data['creation_mode'] = mode
     
-    keyboard = [
-        [InlineKeyboardButton("🔗 Mis Links", callback_data='src_links')],
-        [InlineKeyboardButton("💿 Catálogo", callback_data='src_catalog')],
-        [InlineKeyboardButton("🎲 Mix Sorpresa", callback_data='src_random')],
-        [get_back_button()]
-    ]
-    await query.edit_message_text("🎧 **PASO 2: ¿Origen de la música?**", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SOURCE
-
-# 3. MANEJAR SELECCIÓN DE ORIGEN
-async def handle_source_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == 'return_menu': return await cancel_create(update, context)
-
-    choice = query.data
+    # A. PEGAR LINKS
+    if mode == 'mode_links':
+        await query.edit_message_text("🔗 **Pega tus links de Spotify** (separados por espacio):", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+        return INPUT_LINKS
     
-    if choice == 'src_links':
-        await query.edit_message_text("🔗 Pega tus links:", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
-        return INPUT_LINK
-    
-    elif choice == 'src_catalog':
+    # B. CATÁLOGO SIMPLE
+    elif mode == 'mode_catalog':
         presets = load_presets()
         keyboard = []
         for idx, genre in enumerate(presets.keys()):
-            keyboard.append([InlineKeyboardButton(f"{genre}", callback_data=f"genre_{idx}")])
+            keyboard.append([InlineKeyboardButton(f"{genre}", callback_data=f"cat_{idx}")])
         keyboard.append([get_back_button()])
-        await query.edit_message_text("💿 **Catálogo:**", reply_markup=InlineKeyboardMarkup(keyboard))
-        return SELECT_PRESET
-    
-    elif choice == 'src_random':
+        await query.edit_message_text("💿 **Elige un Estilo:**", reply_markup=InlineKeyboardMarkup(keyboard))
+        return SELECT_CATALOG_SINGLE
+        
+    # C. MEZCLA DE ESTILOS (MULTI)
+    elif mode == 'mode_mix':
+        context.user_data['multi_selection'] = [] # Indices seleccionados
+        return await show_multi_selection_menu(query, context)
+        
+    # D. RANDOM MIX
+    elif mode == 'mode_random':
         presets = load_presets()
-        random_sources = []
-        for genre, items in presets.items():
-            if items:
-                picked = random.choice(items)
-                if isinstance(picked, dict):
-                    random_sources.append(picked.get('url'))
-                else:
-                    random_sources.append(picked)
-        context.user_data['source_urls'] = random_sources
+        genres = list(presets.keys())
         
-        context.user_data['source_tag'] = "Surprise Mix"
-        context.user_data['source_desc'] = "Selección Aleatoria Global"
+        # Cogemos 3 GÉNEROS al azar
+        picked_genres = random.sample(genres, min(3, len(genres)))
         
-        return await ask_duration(query, context)
+        final_urls = []
+        url_genre_map = {}
+        
+        for g in picked_genres:
+            for item in presets[g]:
+                url = item['url']
+                final_urls.append(url)
+                url_genre_map[url] = g
 
-# 4A. SI ELIGIÓ CATÁLOGO
-async def handle_preset_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['source_urls'] = final_urls
+        context.user_data['source_tag'] = "Random Styles"
+        context.user_data['source_desc'] = f"Mix Aleatorio: {', '.join(picked_genres)}"
+        context.user_data['url_genre_map'] = url_genre_map
+        
+        # Saltamos directo a duración (o algoritmo, vamos a algoritmo para consistencia)
+        return await ask_algorithm(query, context)
+
+    return SELECT_MODE
+
+# --- LOGICA MEZCLA ESTILOS (MULTI-SELECT) ---
+async def show_multi_selection_menu(query, context):
+    selected = context.user_data.get('multi_selection', [])
+    presets = load_presets()
+    genres = list(presets.keys())
+    
+    keyboard = []
+    # Filas de 2 columnas
+    row = []
+    for idx, genre in enumerate(genres):
+        status = "✅" if idx in selected else "⬜"
+        btn_text = f"{status} {genre}"
+        row.append(InlineKeyboardButton(btn_text, callback_data=f"multi_{idx}"))
+        
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row: keyboard.append(row)
+    
+    # Botón Confirmar
+    confirm_text = f"🚀 MEZCLAR ({len(selected)})" if selected else "Selecciona..."
+    keyboard.append([InlineKeyboardButton(confirm_text, callback_data="multi_confirm")])
+    keyboard.append([get_back_button()])
+    
+    msg = "🧬 **MEZCLADOR DE ESTILOS**\nToca para seleccionar/deseleccionar. Mínimo 2 recomendados."
+    
+    # Si venimos de un edit, editamos.
+    try:
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+    except:
+        # A veces si el mensaje es igual da error, no importa
+        pass
+    return SELECT_CATALOG_MULTI
+
+async def handle_multi_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == 'return_menu': return await cancel_create(update, context)
     
-    try:
-        idx = int(query.data.replace("genre_", ""))
-        presets = load_presets()
-        all_genres = list(presets.keys())
-        
-        if 0 <= idx < len(all_genres):
-            genre = all_genres[idx]
-            context.user_data['source_urls'] = [item['url'] for item in presets.get(genre, [])]
-            
-            context.user_data['source_tag'] = genre
-            context.user_data['source_desc'] = f"Catálogo: {genre}"
-            
-        else:
-            await query.edit_message_text("❌ Error: Género no encontrado.")
-            return await cancel_create(update, context)
-
-    except ValueError:
-        await query.edit_message_text("❌ Error interno de índices.")
-        return await cancel_create(update, context)
+    data = query.data
     
-    return await ask_duration(query, context)
+    if data == "multi_confirm":
+        selected = context.user_data.get('multi_selection', [])
+        if not selected:
+            await query.answer("⚠️ Selecciona al menos uno.", show_alert=True)
+            return SELECT_CATALOG_MULTI
+            
+        # Procesar selección
+        presets = load_presets()
+        genres = list(presets.keys())
+        final_urls = []
+        names = []
+        
+        for idx in selected:
+            if 0 <= idx < len(genres):
+                genre = genres[idx]
+                names.append(genre)
+                # Añadimos TODAS las playlists de ese género
+                for item in presets[genre]:
+                    final_urls.append(item['url'])
+        
+        context.user_data['source_urls'] = final_urls
+        context.user_data['source_tag'] = "Style Mashup"
+        context.user_data['source_desc'] = f"Fusión de: {', '.join(names)}"
+        
+        # Mapeo URL -> Genero para balanceo
+        url_genre_map = {}
+        for idx in selected:
+            if 0 <= idx < len(genres):
+                g = genres[idx]
+                for item in presets[g]:
+                    url_genre_map[item['url']] = g
+        context.user_data['url_genre_map'] = url_genre_map
+        
+        return await ask_algorithm(query, context)
+        
+    if data.startswith("multi_"):
+        idx = int(data.replace("multi_", ""))
+        selected = context.user_data.get('multi_selection', [])
+        
+        if idx in selected:
+            selected.remove(idx)
+        else:
+            selected.append(idx)
+            
+        context.user_data['multi_selection'] = selected
+        return await show_multi_selection_menu(query, context)
+        
+    return SELECT_CATALOG_MULTI
 
-# 4B. SI ELIGIÓ LINKS
-async def handle_user_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- HANDLERS PASO 2: FUENTES ---
+
+async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     urls = text.split()
     valid_urls = [u for u in urls if "http" in u]
     
     if not valid_urls:
-        await update.message.reply_text("❌ Link malo.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
-        return INPUT_LINK
+        await update.message.reply_text("❌ Sin links válidos.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+        return INPUT_LINKS
         
     context.user_data['source_urls'] = valid_urls
-
-    context.user_data['source_tag'] = "Custom Mix"
+    context.user_data['source_tag'] = "Custom Links"
+    context.user_data['source_desc'] = "Enlaces proporcionados por usuario"
     
+    # Pasamos a algoritmo no con query sino prompt
+    return await ask_algorithm_msg(update, context)
+
+async def handle_catalog_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'return_menu': return await cancel_create(update, context)
+    
+    try:
+        idx = int(query.data.replace("cat_", ""))
+        presets = load_presets()
+        genres = list(presets.keys())
+        
+        if 0 <= idx < len(genres):
+            genre = genres[idx]
+            context.user_data['source_urls'] = [item['url'] for item in presets[genre]]
+            context.user_data['source_tag'] = genre
+            context.user_data['source_desc'] = f"Catálogo: {genre}"
+            
+            # Map simple
+            url_genre_map = {u: genre for u in context.user_data['source_urls']}
+            context.user_data['url_genre_map'] = url_genre_map
+            
+            return await ask_algorithm(query, context)
+    except: pass
+    
+    await query.edit_message_text("❌ Error.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+    return ConversationHandler.END
+
+# --- PASO 3: ALGORITMO ---
+
+async def ask_algorithm(query, context):
     keyboard = [
-        [InlineKeyboardButton("30 min", callback_data='dur_30'), InlineKeyboardButton("60 min", callback_data='dur_60')],
-        [InlineKeyboardButton("90 min", callback_data='dur_90'), InlineKeyboardButton("120 min", callback_data='dur_120')],
-        [InlineKeyboardButton("150 min", callback_data='dur_150')],
+        [InlineKeyboardButton("⚡ Max Energy (Gym)", callback_data='algo_energy')],
+        [InlineKeyboardButton("🔥 Temas populares", callback_data='algo_party')],
+        [InlineKeyboardButton("🔭 Discovery (Novedades)", callback_data='algo_discovery')],
+        [InlineKeyboardButton("🎲 Random (Sorpréndeme)", callback_data='algo_random')],
         [get_back_button()]
     ]
-    await update.message.reply_text("⏱️ **PASO 3: Duración**", reply_markup=InlineKeyboardMarkup(keyboard))
-    return DURATION
+    await query.edit_message_text("🧠 **PASO 2: Elige Algoritmo**", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_ALGORITHM
 
-# AUXILIAR: PREGUNTAR DURACIÓN
+async def ask_algorithm_msg(update, context):
+    keyboard = [
+        [InlineKeyboardButton("⚡ Max Energy", callback_data='algo_energy')],
+        [InlineKeyboardButton("🔥 Temas populares", callback_data='algo_party')],
+        [InlineKeyboardButton("🔭 Discovery", callback_data='algo_discovery')],
+        [InlineKeyboardButton("🎲 Random", callback_data='algo_random')],
+        [get_back_button()]
+    ]
+    await update.message.reply_text("🧠 **PASO 2: Elige Algoritmo**", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_ALGORITHM
+
+async def handle_algorithm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'return_menu': return await cancel_create(update, context)
+    
+    context.user_data['algorithm'] = query.data
+    return await ask_duration(query, context)
+
+# --- PASO 4: DURACIÓN ---
+
 async def ask_duration(query, context):
     keyboard = [
         [InlineKeyboardButton("30 min", callback_data='dur_30'), InlineKeyboardButton("60 min", callback_data='dur_60')],
         [InlineKeyboardButton("90 min", callback_data='dur_90'), InlineKeyboardButton("120 min", callback_data='dur_120')],
-        [InlineKeyboardButton("150 min", callback_data='dur_150')],
         [get_back_button()]
     ]
-    await query.edit_message_text("⏱️ **PASO 3: Duración**", reply_markup=InlineKeyboardMarkup(keyboard))
-    return DURATION
+    await query.edit_message_text("⏱️ **PASO 3: Duración Final**", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_DURATION
 
-# 5. PROCESO FINAL (LÓGICA ROUND ROBIN IMPLEMENTADA)
+# --- PASO 5: PROCESO (REUTILIZAMOS LOGICA EXISTENTE) ---
+# Copiaremos la funcion process_creation original pero adaptada minimamente si hace falta.
+# La logica de shuffling y features es agnostica al origen, solo necesita 'source_urls' en user_data.
+
 async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.data == 'return_menu': return await cancel_create(update, context)
 
     mins = int(query.data.replace("dur_", ""))
     limit_ms = mins * 60 * 1000
-    msg = await query.edit_message_text(f"⏳ **Generando sesión de {mins} min...**")
+    msg = await query.edit_message_text(f"⏳ **Generando sesión...**\n(Analizando audio features de múltiples fuentes)")
 
+    # --- AQUI EMPIEZA LA LOGICA CORE DE GENERACION ---
+    # Copiamos la lógica del archivo original para mantenerla consistente
     try:
         source_urls = context.user_data.get('source_urls', [])
-        source_urls = [u for u in source_urls if u] 
+        source_urls = [u for u in source_urls if u]
         algo = context.user_data.get('algorithm')
         now = datetime.now(timezone.utc)
         
-        # --- ESTRATEGIA ROUND ROBIN: PROCESAMOS CADA PLAYLIST POR SEPARADO ---
-        playlists_buckets = [] # Aquí guardaremos listas de canciones ya ordenadas: [[A1, A2...], [B1, B2...]]
+        playlists_buckets = [] 
         real_playlist_names = []
+        failed_stats = [] # To accumulate errors
         
+        # PROCESO DE CARGA (Igual que antes)
         for url in source_urls:
             pid = extract_playlist_id(url)
             if not pid: continue
             
-            # 1. Obtener Nombre (si es custom)
-            if context.user_data.get('source_tag') == "Custom Mix":
+            # Solo buscar nombres si son links manuales para descripción
+            if context.user_data.get('source_tag') == "Custom Links":
                 try:
                     pl_meta = sp.playlist(pid, fields="name")
                     real_playlist_names.append(pl_meta['name'])
                 except:
-                    real_playlist_names.append("Privada")
+                    real_playlist_names.append("Priv")
 
-            # 2. Leer canciones de ESTA fuente
             this_pl_tracks = []
             try:
-                res = sp.playlist_tracks(pid, limit=100) # Leemos 100 para tener margen de filtrado
+                res = sp.playlist_tracks(pid, limit=100)
                 items = res['items']
-                if res['next']: # Si hay más, leemos un poco más
-                     res = sp.next(res)
+                if res['next']: 
+                     res = sp.next(res) # Paginamos una vez mas para tener variedad
                      items.extend(res['items'])
                 
                 for item in items:
                     if item.get('track') and item['track'].get('id'):
                         this_pl_tracks.append(item)
             except Exception as e:
-                print(f"⚠️ Error leyendo {url}: {e}")
+                failed_stats.append(f"{pid}: {str(e)[:50]}")
                 continue
             
             if not this_pl_tracks: continue
 
-            # 3. Obtener Audio Features de ESTE lote
+            # Audio Features
             tids = list(set([t['track']['id'] for t in this_pl_tracks]))
             features_map = {}
             for i in range(0, len(tids), 100):
@@ -225,29 +353,22 @@ async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if f: features_map[f['id']] = f
                 except: pass
 
-            # 4. Puntuar y Ordenar ESTE lote (Aplicar criterio Energy/Hype + Jitter)
+            # Puntuar
             scored_tracks = []
-            
-            # Shuffle inicial para romper el orden de la lista original antes de puntuar
             random.shuffle(this_pl_tracks) 
 
             for item in this_pl_tracks:
                 track = item['track']
                 feat = features_map.get(track['id'])
-                
-                # --- FACTOR CAOS (JITTER) ---
                 luck = random.randint(0, 100)
                 score = 0
                 
                 if algo == 'algo_energy': 
                     energy_val = (feat['energy'] * 100) if feat else 50
-                    score = (energy_val * 0.7) + (luck * 0.3)
+                    score = (energy_val * 0.9) + (luck * 0.1)
 
                 elif algo == 'algo_party': 
-                    base_val = track['popularity']
-                    if feat: base_val += (feat['danceability'] * 100)
-                    base_val = base_val / 2
-                    score = (base_val * 0.85) + (luck * 0.15)
+                    score = track['popularity'] 
 
                 elif algo == 'algo_discovery':
                     try:
@@ -255,118 +376,141 @@ async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             added = datetime.fromisoformat(item['added_at'].replace('Z', '+00:00'))
                             days_old = (now - added).days
                             if days_old <= 30: 
-                                score = 500 + track['popularity'] + (luck * 2) 
+                                score = track['popularity'] + 1 # Priorizamos popularidad dentro de los nuevos
                             else: 
-                                score = (track['popularity'] * 0.5) + (luck * 0.5)
-                        else:
-                            score = (track['popularity'] * 0.5) + (luck * 0.5)
-                    except: 
-                        score = (track['popularity'] * 0.5) + (luck * 0.5)
+                                score = 0 # Strict filtering: fuera
+                        else: score = 0
+                    except: score = 0
+
+                elif algo == 'algo_random':
+                    score = random.randint(1, 100) # Full random
 
                 if score > 0:
                     scored_tracks.append({'uri': track['uri'], 'dur': track['duration_ms'], 'score': score})
 
-            # Ordenamos este cubo por puntuación (Los mejores de ESTA lista arriba)
             scored_tracks.sort(key=lambda x: x['score'], reverse=True)
-            
             if scored_tracks:
-                playlists_buckets.append(scored_tracks)
+                # Guardamos bucket con metadatos
+                pl_genre = context.user_data.get('url_genre_map', {}).get(url, "Unknown")
+                playlists_buckets.append({'genre': pl_genre, 'tracks': scored_tracks})
 
         if not playlists_buckets:
-            await msg.edit_text("❌ No pude obtener canciones válidas de ninguna lista.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+            error_details = "\n".join(failed_stats) if failed_stats else "No valid tracks"
+            await msg.edit_text(f"❌ No se pudo extraer música válida.\n\nDetalles:\n{error_details}")
             return ConversationHandler.END
 
-        # --- FASE DE MEZCLA: ROUND ROBIN ---
+        # ROUND ROBIN MIX (POR GÉNERO)
+        # 1. Agrupar buckets por género
+        genre_pools = {}
+        for bucket in playlists_buckets:
+            g = bucket['genre']
+            if g not in genre_pools: genre_pools[g] = []
+            genre_pools[g].append(bucket['tracks'])
+            
+        genres_list = list(genre_pools.keys())
+        random.shuffle(genres_list) # Mezclar orden de géneros inicial
+        
         final_uris = []
         curr_ms = 0
         seen_uris = set()
-        
-        # Iteramos mientras no alcancemos el tiempo y queden canciones
         keep_going = True
+        
         while keep_going:
-            keep_going = False # Asumimos que paramos a menos que añadamos algo
+            keep_going = False
+            random.shuffle(genres_list) # Variar orden en cada ronda (opcional, pero da más sabor)
             
-            # Recorremos cada cubo (playlist) y sacamos LA MEJOR que le quede
-            for bucket in playlists_buckets:
-                if not bucket: continue # Este cubo ya se vació
+            for g in genres_list:
+                # Obtenemos los buckets de este género
+                buckets = genre_pools[g]
+                if not buckets: continue # Si se acabaron todos los buckets de este genero
                 
-                # Comprobamos si nos pasamos de tiempo antes de añadir
-                if curr_ms >= limit_ms:
+                # Cogemos del primer bucket disponible (Rotacion interna de playlists)
+                # Para hacerlo simple: Cogemos del bucket 0, y luego rotamos ese bucket al final
+                current_bucket_tracks = buckets[0]
+                
+                if current_bucket_tracks:
+                    found_track = False
+                    # Buscamos track no repetido en este bucket
+                    while current_bucket_tracks:
+                        track = current_bucket_tracks.pop(0) # El mejor puntudado
+                        if track['uri'] not in seen_uris:
+                            final_uris.append(track['uri'])
+                            seen_uris.add(track['uri'])
+                            curr_ms += track['dur']
+                            found_track = True
+                            keep_going = True # Seguimos vivos
+                            break
+                    
+                    # Rotamos los buckets de este genero para que la proxima vez coja de la siguiente playlist
+                    buckets.append(buckets.pop(0))
+                else:
+                    # Este bucket se vació, lo quitamos
+                    buckets.pop(0)
+                    if buckets: keep_going = True # Aun quedan otros buckets en este genero
+
+                if curr_ms >= limit_ms: 
                     keep_going = False
                     break
-                
-                # Sacamos la mejor canción restante (pop del principio)
-                track = bucket.pop(0)
-                
-                if track['uri'] not in seen_uris:
-                    final_uris.append(track['uri'])
-                    seen_uris.add(track['uri'])
-                    curr_ms += track['dur']
-                    keep_going = True # Hemos añadido algo, seguimos otra vuelta
-
+            
             if curr_ms >= limit_ms: break
 
         if not final_uris:
-            await msg.edit_text("⚠️ No se generó la lista.", reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
+            await msg.edit_text("⚠️ Fallo en generación.")
             return ConversationHandler.END
 
-        # --- CREACIÓN EN SPOTIFY ---
+        # CREAR EN SPOTIFY
         user_id = sp.me()['id']
-        unique_suffix = uuid.uuid4().hex[:4].upper()
+        unique = uuid.uuid4().hex[:4].upper()
         tg_user = update.effective_user
         user_ref = f"@{tg_user.username}" if tg_user.username else tg_user.first_name
         
+        # Construir Nombre
         mode_names = {
-            'algo_energy': 'Max Energy',
-            'algo_party': 'Party Hype',
-            'algo_discovery': 'Discovery'
+            'algo_energy': 'Max Energy', 
+            'algo_party': 'Temas Populares', 
+            'algo_discovery': 'Discovery',
+            'algo_random': 'Random Mode'
         }
-        mode_str = mode_names.get(algo, 'Mix')
+        algo_str = mode_names.get(algo, 'Mix')
+        tag = context.user_data.get('source_tag', 'Mix')
         
-        # Descripción
-        source_tag = context.user_data.get('source_tag', 'Mix')
-        if source_tag == "Custom Mix" and real_playlist_names:
-            names_str = ", ".join(real_playlist_names)
-            if len(names_str) > 150: names_str = names_str[:147] + "..."
-            source_desc = f"Mezcla equitativa de: {names_str}"
-        else:
-            source_desc = context.user_data.get('source_desc', 'Origen desconocido')
+        pl_name = f"SpotiSession: {tag} ({algo_str}) [{unique}]"
+        
+        # Descripción inteligente
+        desc_origin = context.user_data.get('source_desc', '')
+        if tag == "Custom Links" and real_playlist_names:
+            desc_origin = "Mezcla de: " + ", ".join(real_playlist_names)
+            
+        desc = f"Creada para {user_ref} | Modo: {algo_str} | {desc_origin}"
+        if len(desc) > 300: desc = desc[:297] + "..."
 
-        playlist_name = f"SpotiSession: {source_tag} ({mode_str}) [{unique_suffix}]"
-        
-        final_description = (
-            f"Creada por SpotiBOT para {user_ref}. "
-            f"Modo: {mode_str}. "
-            f"{source_desc}."
-        )
-        
-        new_pl = sp.user_playlist_create(
-            user=user_id, 
-            name=playlist_name, 
-            public=True, 
-            description=final_description
-        )
-        
+        new_pl = sp.user_playlist_create(user=user_id, name=pl_name, public=True, description=desc)
         stats.count_new_playlist()
         
+        # Añadir canciones
         for i in range(0, len(final_uris), 100):
             sp.playlist_add_items(new_pl['id'], final_uris[i:i+100])
         pl_url = new_pl['external_urls']['spotify']
         
+        # PORTADA
         try:
-            prefix_map = {'algo_energy': 'maxenergy', 'algo_party': 'partyhype', 'algo_discovery': 'discovery'}
+            prefix_map = {
+                'algo_energy': 'maxenergy', 
+                'algo_party': 'partyhype', 
+                'algo_discovery': 'discovery',
+                'algo_random': 'spotimix' # Default fallback
+            }
             img_prefix = prefix_map.get(algo, 'spotimix')
             images_dir = os.path.join(config.BASE_DIR, 'images', 'pool')
             candidates = [f for f in os.listdir(images_dir) if f.startswith(img_prefix) and f.endswith(".jpg")]
             if candidates:
-                selected_img = random.choice(candidates)
-                img_path = os.path.join(images_dir, selected_img)
-                with open(img_path, "rb") as img_file:
-                    img_b64 = base64.b64encode(img_file.read()).decode('utf-8')
-                sp.playlist_upload_cover_image(new_pl['id'], img_b64)
-        except Exception as e:
-            print(f"❌ Error subiendo portada: {e}")
+                sel_img = random.choice(candidates)
+                with open(os.path.join(images_dir, sel_img), "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                sp.playlist_upload_cover_image(new_pl['id'], b64)
+        except Exception: pass
 
+        # QR CODE
         qr = qrcode.QRCode(box_size=10, border=2)
         qr.add_data(pl_url)
         qr.make(fit=True)
@@ -375,28 +519,16 @@ async def process_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bio.seek(0)
         
         await msg.delete()
-        
         caption = (
-            f"✅ **{playlist_name}**\n\n"
-            f"📝 **{source_desc}**\n\n"
+            f"✅ **{pl_name}**\n\n"
+            f"📝 {desc_origin}\n"
             f"⏱ **Duración:** {int(curr_ms/60000)} min\n"
             f"🔗 {pl_url}\n\n"
-            "♻️ **Esta playlist se autodestruirá en 3 meses.**\n"
-            "Si no quieres que esto ocurra, dale a **Seguir** y se conservará para siempre ❤️\n\n"
-            "✅ **Acción completada.**"
+            "♻️ **Caduca en 3 meses.** (Seguir para guardar)\n"
         )
         
-        await update.effective_message.reply_photo(
-            photo=bio,
-            caption=caption,
-            reply_markup=InlineKeyboardMarkup([[get_back_button()]])
-        )
+        await update.effective_message.reply_photo(photo=bio, caption=caption, reply_markup=InlineKeyboardMarkup([[get_back_button()]]))
 
     except Exception as e:
-        print(f"Error fatal en proceso: {e}")
-        await update.effective_message.reply_text(
-            f"❌ Ocurrió un error: {e}", 
-            reply_markup=InlineKeyboardMarkup([[get_back_button()]])
-        )
-    
-    return ConversationHandler.END
+        await query.message.reply_text(f"❌ Error al crear playlist: {e}")
+        return ConversationHandler.END

@@ -1,0 +1,33 @@
+import os
+
+# --- RUTAS ABSOLUTAS ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_PATH = os.path.join(BASE_DIR, '.cache_spotibot')
+
+# CREDENCIALES DE SPOTIFY (Dashboard Developer)
+SPOTIPY_CLIENT_ID = 'TU_CLIENT_ID_AQUI'
+SPOTIPY_CLIENT_SECRET = 'TU_CLIENT_SECRET_AQUI'
+SPOTIPY_REDIRECT_URI = 'http://127.0.0.1:8888/callback'
+
+# CREDENCIALES TELEGRAM
+TELEGRAM_TOKEN = 'TU_TOKEN_TELEGRAM_AQUI'
+
+# ADMIN ID (Tu ID numérico de Telegram)
+# Puedes obtenerlo hablando con @userinfobot
+ADMIN_ID = 123456789
+
+# INFO DEL DEVELOPER (Para comando /info)
+DEV_INFO = {
+    "name": "Tu Nombre",
+    "github": "https://github.com/tu-usuario",
+    "linkedin": "...",
+    "email": "..."
+}
+
+# SETUP CARPETAS
+DIRS = {
+    "images": "images/pool",
+    "data": "data"
+}
+
+COOLDOWN_SECONDS = 10

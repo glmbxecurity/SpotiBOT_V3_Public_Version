@@ -8,3 +8,4 @@ venv/
 *.log
 stats.json
 .DS_Store
+config.py

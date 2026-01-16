@@ -14,21 +14,25 @@ warnings.filterwarnings("ignore", category=PTBUserWarning)
 # IMPORTS LOCALES
 import config
 import stats
+import admin_panel
 
 # MÓDULOS
-from comandos_basicos import start, help_command, info_command, check_catalog_health
+from comandos_basicos import start, help_command, info_command, view_catalog
 
 from funcion_create import (
-    start_create, handle_source_selection, handle_preset_selection, 
-    handle_user_links, save_algorithm, process_creation, cancel_create,
-    ALGORITHM, SOURCE, SELECT_PRESET, INPUT_LINK, DURATION 
+    start_create, handle_mode_selection, handle_links, handle_catalog_single,
+    handle_multi_selection, ask_algorithm, handle_algorithm, ask_duration, 
+    process_creation, cancel_create,
+    SELECT_MODE, INPUT_LINKS, SELECT_CATALOG_SINGLE, SELECT_CATALOG_MULTI, 
+    SELECT_ALGORITHM, SELECT_DURATION
 )
 from funcion_scan import (
     start_scan, receive_link, process_scan_result, cancel_scan, 
     INPUT_SCAN_LINK, SELECT_LIMIT
 )
-from funcion_mix import (
-    start_mix, process_mix, cancel_mix, INPUT_MIX_LINKS
+from funcion_scan import (
+    start_scan, receive_link, process_scan_result, cancel_scan, 
+    INPUT_SCAN_LINK, SELECT_LIMIT
 )
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -59,11 +63,8 @@ async def scan_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await check_rate_limit(update, context): return await start_scan(update, context)
     return ConversationHandler.END
 
-async def mix_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_rate_limit(update, context): return await start_mix(update, context)
-    return ConversationHandler.END
 
-# --- LÓGICA DEL BOTÓN MENÚ PRINCIPAL ---
+
 # --- LÓGICA DEL BOTÓN MENÚ PRINCIPAL ---
 async def return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -75,50 +76,69 @@ async def return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --- INT ERRORES SILENCIOSOS (CROSS-CANCELLATION) ---
-# Esta función simplemente termina la conversación actual sin decir nada.
-# Se usa cuando otro comando "roba" el foco.
 async def quiet_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 if __name__ == '__main__':
-    print("🔥 SpotiBOT v1.0 ONLINE")
+    print("🔥 SpotiBOT v3.5 ONLINE")
     
     application = ApplicationBuilder().token(config.TELEGRAM_TOKEN).build()
     
     # 1. HANDLERS GLOBALES
     application.add_handler(CallbackQueryHandler(return_to_menu, pattern='^return_menu$'))
-    application.add_handler(CallbackQueryHandler(check_catalog_health, pattern='^check_catalog$'))
+    application.add_handler(CallbackQueryHandler(view_catalog, pattern='^view_catalog$'))
 
     # 2. COMANDOS BÁSICOS
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('info', info_command))
     
-    # 3. CREATE (GROUP 1)
+    # 3. CREATE HANDLER (ACTUALIZADO - FLUJO NUEVO)
+    # Estados: SELECT_MODE -> [INPUT_LINKS | SELECT_CATALOG_SINGLE | SELECT_CATALOG_MULTI] -> SELECT_ALGORITHM -> SELECT_DURATION
     create_handler = ConversationHandler(
         entry_points=[CommandHandler('create', create_entry_point)],
         states={
-            ALGORITHM: [CallbackQueryHandler(save_algorithm, pattern='^algo_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            SOURCE: [CallbackQueryHandler(handle_source_selection, pattern='^src_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            SELECT_PRESET: [CallbackQueryHandler(handle_preset_selection, pattern='^genre_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            INPUT_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_links), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
-            DURATION: [CallbackQueryHandler(process_creation, pattern='^dur_'), CallbackQueryHandler(cancel_create, pattern='^return_menu$')],
+            # Paso 1: Modo
+            SELECT_MODE: [
+                CallbackQueryHandler(handle_mode_selection, pattern='^mode_'), 
+                CallbackQueryHandler(cancel_create, pattern='^return_menu$')
+            ],
+            # Paso 2: Fuentes
+            INPUT_LINKS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links), 
+                CallbackQueryHandler(cancel_create, pattern='^return_menu$')
+            ],
+            SELECT_CATALOG_SINGLE: [
+                CallbackQueryHandler(handle_catalog_single, pattern='^cat_'), 
+                CallbackQueryHandler(cancel_create, pattern='^return_menu$')
+            ],
+            SELECT_CATALOG_MULTI: [
+                CallbackQueryHandler(handle_multi_selection, pattern='^multi_'), 
+                CallbackQueryHandler(cancel_create, pattern='^return_menu$')
+            ],
+            # Paso 3: Algoritmo
+            SELECT_ALGORITHM: [
+                CallbackQueryHandler(handle_algorithm, pattern='^algo_'), 
+                CallbackQueryHandler(cancel_create, pattern='^return_menu$')
+            ],
+            # Paso 4: Duración
+            SELECT_DURATION: [
+                CallbackQueryHandler(process_creation, pattern='^dur_'), 
+                CallbackQueryHandler(cancel_create, pattern='^return_menu$')
+            ],
         },
         fallbacks=[
             CommandHandler('cancel', cancel_create), 
             CallbackQueryHandler(cancel_create, pattern='^return_menu$'),
-            # Interrupciones de otros comandos:
+            # Interrupciones:
             CommandHandler('scan', quiet_cancel),
-            CommandHandler('mix', quiet_cancel),
-            CommandHandler('info', quiet_cancel),
-            CommandHandler('help', quiet_cancel),
-            CommandHandler('start', quiet_cancel)
+            CommandHandler('admin', quiet_cancel)
         ],
         per_message=False
     )
     application.add_handler(create_handler, group=1)
 
-    # 4. SCAN (GROUP 2)
+    # 4. SCAN HANDLER (LEGACY)
     scan_handler = ConversationHandler(
         entry_points=[CommandHandler('scan', scan_entry_point)],
         states={
@@ -128,35 +148,50 @@ if __name__ == '__main__':
         fallbacks=[
             CommandHandler('cancel', cancel_scan), 
             CallbackQueryHandler(cancel_scan, pattern='^return_menu$'),
-            # Interrupciones:
             CommandHandler('create', quiet_cancel),
-            CommandHandler('mix', quiet_cancel),
-            CommandHandler('info', quiet_cancel),
-            CommandHandler('help', quiet_cancel),
             CommandHandler('start', quiet_cancel)
         ],
         per_message=False
     )
     application.add_handler(scan_handler, group=2)
 
-    # 5. MIX (GROUP 3)
-    mix_handler = ConversationHandler(
-        entry_points=[CommandHandler('mix', mix_entry_point)],
-        states={
-            INPUT_MIX_LINKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_mix), CallbackQueryHandler(cancel_mix, pattern='^return_menu$')]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel_mix), 
-            CallbackQueryHandler(cancel_mix, pattern='^return_menu$'),
-            # Interrupciones:
-            CommandHandler('create', quiet_cancel),
-            CommandHandler('scan', quiet_cancel),
-            CommandHandler('info', quiet_cancel),
-            CommandHandler('help', quiet_cancel),
-            CommandHandler('start', quiet_cancel)
+
+    
+    # 6. ADMIN HANDLER (NUEVO)
+    admin_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler('admin', admin_panel.admin_entry_point),
+            CallbackQueryHandler(admin_panel.admin_entry_point, pattern='^admin_entry$')
         ],
+        states={
+            admin_panel.ADMIN_MENU: [
+                CallbackQueryHandler(admin_panel.admin_yaml_menu, pattern='^admin_yaml$'),
+                CallbackQueryHandler(admin_panel.admin_run_cleaner, pattern='^admin_clean$'),
+                CallbackQueryHandler(admin_panel.admin_diagnostics, pattern='^admin_diag$'),
+                CallbackQueryHandler(admin_panel.admin_restart_service, pattern='^admin_restart$'),
+                CallbackQueryHandler(admin_panel.admin_auth_start, pattern='^admin_auth$'),
+                CallbackQueryHandler(admin_panel.admin_exit, pattern='^admin_exit$'),
+                CallbackQueryHandler(admin_panel.show_admin_menu, pattern='^return_admin$')
+            ],
+            # YAML SUB-FLOW
+            admin_panel.EDIT_YAML_MENU: [
+                CallbackQueryHandler(admin_panel.yaml_add_start, pattern='^yaml_add$'),
+                CallbackQueryHandler(admin_panel.yaml_remove_start, pattern='^yaml_remove$'),
+                CallbackQueryHandler(admin_panel.show_admin_menu, pattern='^return_admin$')
+            ],
+            admin_panel.ADD_PLAYLIST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel.yaml_add_name)],
+            admin_panel.ADD_PLAYLIST_GENRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel.yaml_add_genre)],
+            admin_panel.ADD_PLAYLIST_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel.yaml_add_url)],
+            admin_panel.REMOVE_PLAYLIST_USELECT: [
+                CallbackQueryHandler(admin_panel.yaml_remove_confirm, pattern='^del_'),
+                CallbackQueryHandler(admin_panel.show_admin_menu, pattern='^return_admin$')
+            ],
+            # AUTH SUB-FLOW
+            admin_panel.AUTH_INPUT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel.admin_auth_complete)]
+        },
+        fallbacks=[CommandHandler('cancel', admin_panel.admin_exit), CallbackQueryHandler(admin_panel.admin_exit, pattern='^admin_exit$')],
         per_message=False
     )
-    application.add_handler(mix_handler, group=3)
+    application.add_handler(admin_handler, group=99) 
     
     application.run_polling()
